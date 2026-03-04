@@ -1,0 +1,6 @@
+canvas {
+  cursor: crosshair !important;
+}
+html, body, #root {
+  cursor: crosshair !important;
+}
