@@ -1,8 +1,9 @@
-import React, { Suspense, useState, useEffect, useRef, useCallback, useMemo } from 'react'
-import { Canvas } from '@react-three/fiber'
-import { Environment, PerspectiveCamera } from '@react-three/drei'
+import React, { Suspense, useState, useEffect, useRef, useCallback, useMemo, useLayoutEffect } from 'react'
+import { Canvas, useFrame, useThree } from '@react-three/fiber'
+import { Environment, PerspectiveCamera, useGLTF } from '@react-three/drei'
 import { EffectComposer, Bloom, Noise, Vignette, BrightnessContrast, ChromaticAberration } from '@react-three/postprocessing'
 import { BlendFunction } from 'postprocessing'
+import * as THREE from 'three'
 import { Vector2 } from 'three'
 import Scene from './Scene'
 
@@ -514,6 +515,155 @@ function GlitchLines({ stage }) {
   )
 }
 
+// ── MOBILE SCENE — lightweight, touch-responsive ─────────────
+function MobileScene() {
+  const { scene }  = useGLTF('/Untitled-v1.glb')
+  const groupRef   = useRef()
+  const centered   = useRef(false)
+  const meshes     = useRef([])
+  const rot        = useRef({ x: 0, y: 0 })
+  const targetRot  = useRef({ x: 0, y: 0 })
+  const touchRef   = useRef(null)
+  const introP     = useRef(0)
+
+  // Shared uniforms — simplified subset (no burst, no glitch)
+  const uniforms = useRef({
+    uTime:         { value: 0 },
+    uBreath:       { value: 0 },
+    uGlitchTime:   { value: 0 },
+    uGlitchAmount: { value: 0 },
+    uFragmentBurst:{ value: 0 },
+    uReassemble:   { value: 0 },
+    uSeed:         { value: Math.random() * 100 },
+  })
+
+  useLayoutEffect(() => {
+    meshes.current = []
+    const u = uniforms.current
+    scene.traverse(obj => {
+      if (!obj.isMesh) return
+      obj.material.color                     = new THREE.Color('#978585')
+      obj.material.metalness                 = 0.45
+      obj.material.roughness                 = 0.28
+      obj.material.iridescence               = 1.0
+      obj.material.iridescenceIOR            = 3.2
+      obj.material.iridescenceThicknessRange = [120, 900]
+      obj.material.clearcoat                 = 1.0
+      obj.material.clearcoatRoughness        = 0.04
+      obj.material.envMapIntensity           = 2.8
+      obj.material.transparent               = true
+      obj.material.opacity                   = 0
+      obj.material.needsUpdate               = true
+
+      obj.material.onBeforeCompile = shader => {
+        shader.uniforms.uTime          = u.uTime
+        shader.uniforms.uBreath        = u.uBreath
+        shader.uniforms.uGlitchTime    = u.uGlitchTime
+        shader.uniforms.uGlitchAmount  = u.uGlitchAmount
+        shader.uniforms.uFragmentBurst = u.uFragmentBurst
+        shader.uniforms.uReassemble    = u.uReassemble
+        shader.uniforms.uSeed          = u.uSeed
+
+        shader.vertexShader = shader.vertexShader.replace('#include <common>',
+          `#include <common>
+          uniform float uTime; uniform float uBreath; uniform float uGlitchTime;
+          uniform float uGlitchAmount; uniform float uFragmentBurst; uniform float uReassemble; uniform float uSeed;
+          float hash(float n){ return fract(sin(n)*43758.5453123); }
+          vec3 hash3(float n){ return vec3(hash(n),hash(n+1.0),hash(n+2.0))*2.0-1.0; }
+          float noise(vec3 p){ vec3 i=floor(p);vec3 f=fract(p);f=f*f*(3.0-2.0*f);
+            return mix(mix(mix(hash(dot(i,vec3(1,57,113))),hash(dot(i+vec3(1,0,0),vec3(1,57,113))),f.x),
+              mix(hash(dot(i+vec3(0,1,0),vec3(1,57,113))),hash(dot(i+vec3(1,1,0),vec3(1,57,113))),f.x),f.y),
+              mix(mix(hash(dot(i+vec3(0,0,1),vec3(1,57,113))),hash(dot(i+vec3(1,0,1),vec3(1,57,113))),f.x),
+              mix(hash(dot(i+vec3(0,1,1),vec3(1,57,113))),hash(dot(i+vec3(1,1,1),vec3(1,57,113))),f.x),f.y),f.z); }`
+        )
+        shader.vertexShader = shader.vertexShader.replace('#include <begin_vertex>',
+          `#include <begin_vertex>
+          float breathNoise = noise(position*1.8+uTime*0.14);
+          float microPulse = sin(uTime*1.6+position.y*12.0+breathNoise*4.0)*0.006*uBreath;
+          transformed += normal*microPulse;`
+        )
+      }
+      obj.material.needsUpdate = true
+      meshes.current.push(obj)
+    })
+  }, [scene])
+
+  // Touch drag
+  useEffect(() => {
+    const onStart = e => { touchRef.current = { x: e.touches[0].clientX, y: e.touches[0].clientY, rx: targetRot.current.x, ry: targetRot.current.y } }
+    const onMove  = e => {
+      if (!touchRef.current) return
+      const dx = e.touches[0].clientX - touchRef.current.x
+      const dy = e.touches[0].clientY - touchRef.current.y
+      targetRot.current.y = touchRef.current.ry + dx * 0.012
+      targetRot.current.x = Math.max(-0.5, Math.min(0.5, touchRef.current.rx + dy * 0.008))
+    }
+    const onEnd = () => { touchRef.current = null }
+    window.addEventListener('touchstart', onStart, { passive: true })
+    window.addEventListener('touchmove',  onMove,  { passive: true })
+    window.addEventListener('touchend',   onEnd)
+    return () => {
+      window.removeEventListener('touchstart', onStart)
+      window.removeEventListener('touchmove',  onMove)
+      window.removeEventListener('touchend',   onEnd)
+    }
+  }, [])
+
+  const { camera } = useThree()
+
+  useFrame((state, delta) => {
+    const t  = state.clock.getElapsedTime()
+    const u  = uniforms.current
+
+    // Intro camera pull-in
+    introP.current = Math.min(introP.current + delta * 0.28, 1)
+    const eased = 1 - Math.pow(1 - introP.current, 4)
+    camera.position.z = THREE.MathUtils.lerp(38, 11, eased)
+    camera.lookAt(0, 0, 0)
+
+    // Center once
+    if (!centered.current) {
+      const box = new THREE.Box3().setFromObject(scene)
+      if (box.min.x !== Infinity) {
+        const c = new THREE.Vector3(); box.getCenter(c); scene.position.sub(c)
+        centered.current = true
+      }
+    }
+
+    u.uTime.value   = t
+    u.uBreath.value = THREE.MathUtils.clamp((introP.current - 0.75) / 0.25, 0, 1)
+
+    // Smooth rotation toward target (touch) + idle drift
+    rot.current.y += (targetRot.current.y - rot.current.y) * 0.06
+    rot.current.x += (targetRot.current.x - rot.current.x) * 0.06
+    if (!touchRef.current) targetRot.current.y += delta * 0.18 // auto-rotate when idle
+
+    if (groupRef.current) {
+      groupRef.current.rotation.y = rot.current.y
+      groupRef.current.rotation.x = rot.current.x + Math.sin(t * 0.4) * 0.04
+      groupRef.current.position.y = Math.sin(t * 0.44) * 0.04
+    }
+
+    // Opacity fade-in
+    const op = THREE.MathUtils.clamp((introP.current - 0.3) / 0.5, 0, 1)
+    meshes.current.forEach(obj => { obj.material.opacity = op })
+  })
+
+  return (
+    <>
+      {/* Neon key light follows slow orbit */}
+      <pointLight position={[4, 3, 6]}  intensity={6}   distance={18} decay={2} color="#39ff14" />
+      <pointLight position={[-5, -2, 4]} intensity={4}   distance={16} decay={2} color="#00ffaa" />
+      <pointLight position={[0, 6, -8]}  intensity={5}   distance={20} decay={2} color="#7700ff" />
+      <pointLight position={[0, -4, 0]}  intensity={2}   distance={12} decay={2} color="#00ff44" />
+      <ambientLight intensity={0.012} color="#001200" />
+      <group ref={groupRef}>
+        <primitive object={scene} scale={1.22} />
+      </group>
+    </>
+  )
+}
+
 // ── MOBILE GATE ───────────────────────────────────────────────
 function MobileGate() {
   const [vis, setVis] = useState(false)
@@ -521,41 +671,103 @@ function MobileGate() {
   const flicker = useFlicker()
   useEffect(() => {
     setTimeout(() => setVis(true), 100)
-    setTimeout(() => setTin(true), 500)
+    setTimeout(() => setTin(true), 800)
   }, [])
+
   return (
-    <div style={{ width:'100vw',height:'100vh',overflow:'hidden',background:'#010202',display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',padding:'0 32px',position:'relative',opacity:vis?1:0,transition:'opacity 1.2s ease' }}>
+    <div style={{ width:'100vw', height:'100vh', overflow:'hidden', background:'#010202', position:'relative', opacity:vis?1:0, transition:'opacity 1s ease' }}>
       <style>{`
         @import url('https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Space+Mono:wght@400&family=Barlow+Condensed:wght@200;300&display=swap');
         *,*::before,*::after{box-sizing:border-box;margin:0;padding:0;}
         html,body{width:100%;height:100%;overflow:hidden;background:#010202;}
         @keyframes blink-g{0%,49%{opacity:1}50%,100%{opacity:0}}
         @keyframes scan-m{from{background-position:0 0}to{background-position:0 4px}}
+        @keyframes mob-sweep{from{opacity:0;transform:translateY(16px)}to{opacity:1;transform:translateY(0)}}
       `}</style>
-      <div style={{ position:'fixed',inset:0,pointerEvents:'none',backgroundImage:'repeating-linear-gradient(0deg,transparent,transparent 2px,rgba(0,0,0,0.06) 2px,rgba(0,0,0,0.06) 4px)',animation:'scan-m 0.08s linear infinite',opacity:0.65,zIndex:1 }} />
-      <div style={{ position:'fixed',inset:0,pointerEvents:'none',zIndex:1,background:'radial-gradient(ellipse 80% 80% at 50% 50%,transparent 20%,rgba(1,2,2,0.65) 70%,rgba(1,2,2,0.97) 100%)' }} />
+
+      {/* ── 3D canvas — full bleed behind everything ── */}
+      <div style={{ position:'absolute', inset:0, zIndex:0 }}>
+        <Canvas
+          dpr={[1, 1.5]}
+          gl={{ antialias:true, toneMapping:4, toneMappingExposure:0.72, alpha:true, powerPreference:'low-power' }}
+          style={{ background:'transparent' }}
+        >
+          <PerspectiveCamera makeDefault position={[0, 0, 38]} fov={24} />
+          <Suspense fallback={null}>
+            <Environment preset="night" environmentIntensity={0.25} rotation={[0, Math.PI * 0.85, 0]} />
+            <MobileScene />
+          </Suspense>
+        </Canvas>
+      </div>
+
+      {/* ── Gradient overlay — heavy vignette so text reads cleanly ── */}
+      <div style={{
+        position:'absolute', inset:0, zIndex:1, pointerEvents:'none',
+        background:`
+          radial-gradient(ellipse 85% 85% at 50% 50%, transparent 15%, rgba(1,2,2,0.55) 65%, rgba(1,2,2,0.96) 100%),
+          linear-gradient(to bottom, rgba(1,2,2,0.7) 0%, rgba(1,2,2,0.1) 28%, rgba(1,2,2,0.1) 62%, rgba(1,2,2,0.85) 100%)
+        `,
+      }} />
+
+      {/* ── Scanlines ── */}
+      <div style={{ position:'absolute',inset:0,zIndex:2,pointerEvents:'none',backgroundImage:'repeating-linear-gradient(0deg,transparent,transparent 2px,rgba(0,0,0,0.055) 2px,rgba(0,0,0,0.055) 4px)',animation:'scan-m 0.08s linear infinite',opacity:0.7 }} />
+
+      {/* ── Corner brackets ── */}
       {[
-        {top:20,left:20,borderTop:`1px solid rgba(57,255,20,0.18)`,borderLeft:`1px solid rgba(57,255,20,0.18)`},
-        {top:20,right:20,borderTop:`1px solid rgba(57,255,20,0.18)`,borderRight:`1px solid rgba(57,255,20,0.18)`},
-        {bottom:20,left:20,borderBottom:`1px solid rgba(57,255,20,0.18)`,borderLeft:`1px solid rgba(57,255,20,0.18)`},
-        {bottom:20,right:20,borderBottom:`1px solid rgba(57,255,20,0.18)`,borderRight:`1px solid rgba(57,255,20,0.18)`},
-      ].map((s,i) => <div key={i} style={{ position:'fixed',width:22,height:22,zIndex:2,...s }} />)}
-      <div style={{ display:'flex',alignItems:'center',gap:8,marginBottom:40,zIndex:2,opacity:tin?1:0,transition:'opacity 1s ease 0.2s' }}>
-        <div style={{ width:5,height:5,background:N,boxShadow:`0 0 10px ${N}`,opacity:flicker,transition:'opacity 0.04s' }} />
-        <span style={{ fontFamily:'"Bebas Neue",sans-serif',fontSize:18,letterSpacing:'0.22em',color:W }}>MOONVIILLAIN</span>
+        {top:16,left:16,  borderTop:`1px solid rgba(57,255,20,0.16)`,borderLeft:`1px solid rgba(57,255,20,0.16)`},
+        {top:16,right:16, borderTop:`1px solid rgba(57,255,20,0.16)`,borderRight:`1px solid rgba(57,255,20,0.16)`},
+        {bottom:16,left:16, borderBottom:`1px solid rgba(57,255,20,0.16)`,borderLeft:`1px solid rgba(57,255,20,0.16)`},
+        {bottom:16,right:16,borderBottom:`1px solid rgba(57,255,20,0.16)`,borderRight:`1px solid rgba(57,255,20,0.16)`},
+      ].map((s,i) => <div key={i} style={{ position:'absolute',width:20,height:20,zIndex:3,opacity:tin?1:0,transition:`opacity 1s ease ${0.1+i*0.1}s`,...s }} />)}
+
+      {/* ── Top brand bar ── */}
+      <div style={{ position:'absolute',top:0,left:0,right:0,padding:'20px 24px',display:'flex',alignItems:'center',justifyContent:'space-between',zIndex:3,opacity:tin?1:0,transition:'opacity 1s ease 0.2s' }}>
+        <div style={{ display:'flex',alignItems:'center',gap:8 }}>
+          <div style={{ width:5,height:5,background:N,boxShadow:`0 0 10px ${N}`,opacity:flicker,transition:'opacity 0.04s' }} />
+          <span style={{ fontFamily:'"Bebas Neue",sans-serif',fontSize:16,letterSpacing:'0.22em',color:W }}>MOONVIILLAIN</span>
+        </div>
+        <div style={{ fontFamily:'"Space Mono",monospace',fontSize:6.5,letterSpacing:'0.38em',color:'rgba(57,255,20,0.3)',textTransform:'uppercase' }}>SS25</div>
       </div>
-      <div style={{ fontFamily:'"Bebas Neue",sans-serif',fontSize:'clamp(54px,17vw,86px)',lineHeight:0.88,letterSpacing:'0.06em',color:W,textAlign:'center',zIndex:2,opacity:tin?1:0,transform:tin?'translateY(0)':'translateY(20px)',transition:'opacity 1s ease 0.4s, transform 1s ease 0.4s' }}>
-        BEST VIEWED<br/>ON DESKTOP
+
+      {/* ── Top rule ── */}
+      <div style={{ position:'absolute',top:56,left:0,right:0,height:1,background:`linear-gradient(to right,transparent,rgba(57,255,20,0.07) 20%,rgba(57,255,20,0.07) 80%,transparent)`,zIndex:3,opacity:tin?1:0,transition:'opacity 1.5s ease 0.4s' }} />
+
+      {/* ── Main message — lower third so model breathes above ── */}
+      <div style={{
+        position:'absolute', bottom:0, left:0, right:0,
+        padding:'0 28px 52px',
+        zIndex:3,
+        display:'flex', flexDirection:'column', alignItems:'center',
+      }}>
+        {/* Eyebrow */}
+        <div style={{ display:'flex',alignItems:'center',gap:10,marginBottom:14,opacity:tin?1:0,animation:tin?'mob-sweep 0.9s cubic-bezier(.16,1,.3,1) 0.3s both':'none' }}>
+          <div style={{ width:20,height:1,background:N,boxShadow:`0 0 5px ${N}`,opacity:flicker,transition:'opacity 0.04s' }} />
+          <span style={{ fontFamily:'"Space Mono",monospace',fontSize:6.5,letterSpacing:'0.44em',color:'rgba(57,255,20,0.45)',textTransform:'uppercase' }}>Sector Zero — Drop 001</span>
+          <div style={{ width:20,height:1,background:N,boxShadow:`0 0 5px ${N}`,opacity:flicker,transition:'opacity 0.04s' }} />
+        </div>
+
+        {/* Headline */}
+        <div style={{ fontFamily:'"Bebas Neue",sans-serif',fontSize:'clamp(52px,16vw,78px)',lineHeight:0.86,letterSpacing:'0.07em',color:W,textAlign:'center',opacity:tin?1:0,animation:tin?'mob-sweep 1s cubic-bezier(.16,1,.3,1) 0.45s both':'none' }}>
+          BEST<br/>VIEWED ON<br/>DESKTOP
+        </div>
+
+        {/* Divider */}
+        <div style={{ width:1,height:28,background:`linear-gradient(to bottom,rgba(57,255,20,0.3),transparent)`,margin:'16px 0',opacity:tin?1:0,transition:'opacity 1s ease 0.8s' }} />
+
+        {/* Sub */}
+        <div style={{ fontFamily:'"Barlow Condensed",sans-serif',fontWeight:200,fontSize:'clamp(12px,3.8vw,15px)',letterSpacing:'0.2em',textTransform:'uppercase',color:'rgba(160,200,155,0.36)',textAlign:'center',lineHeight:1.85,opacity:tin?1:0,animation:tin?'mob-sweep 1s cubic-bezier(.16,1,.3,1) 0.6s both':'none' }}>
+          The full experience was crafted<br/>for a larger screen.<br/>Drag to preview the model.
+        </div>
+
+        {/* Badge */}
+        <div style={{ marginTop:20,display:'flex',alignItems:'center',gap:8,border:`1px solid rgba(57,255,20,0.14)`,padding:'6px 16px',opacity:tin?1:0,transition:'opacity 1s ease 1s' }}>
+          <div style={{ width:4,height:4,background:N,boxShadow:`0 0 8px ${N}`,animation:'blink-g 1.4s step-end infinite' }} />
+          <span style={{ fontFamily:'"Space Mono",monospace',fontSize:6.5,letterSpacing:'0.38em',color:'rgba(57,255,20,0.45)',textTransform:'uppercase' }}>1 of 1</span>
+        </div>
       </div>
-      <div style={{ width:1,height:40,background:`linear-gradient(to bottom,rgba(57,255,20,0.35),transparent)`,margin:'26px 0',zIndex:2,opacity:tin?1:0,transition:'opacity 1s ease 0.6s' }} />
-      <div style={{ fontFamily:'"Barlow Condensed",sans-serif',fontWeight:200,fontSize:'clamp(13px,4vw,16px)',letterSpacing:'0.18em',textTransform:'uppercase',color:'rgba(160,200,155,0.38)',textAlign:'center',lineHeight:1.9,zIndex:2,opacity:tin?1:0,transition:'opacity 1s ease 0.7s' }}>
-        The full experience was crafted<br/>for a larger screen.
-      </div>
-      <div style={{ marginTop:32,display:'flex',alignItems:'center',gap:8,border:`1px solid rgba(57,255,20,0.16)`,padding:'8px 20px',zIndex:2,opacity:tin?1:0,transition:'opacity 1s ease 0.9s' }}>
-        <div style={{ width:4,height:4,background:N,boxShadow:`0 0 8px ${N}`,animation:'blink-g 1.4s step-end infinite' }} />
-        <span style={{ fontFamily:'"Space Mono",monospace',fontSize:7,letterSpacing:'0.4em',color:'rgba(57,255,20,0.5)',textTransform:'uppercase' }}>Sector Zero — 1 of 1</span>
-      </div>
-      <div style={{ position:'fixed',bottom:24,zIndex:2,fontFamily:'"Space Mono",monospace',fontSize:6.5,letterSpacing:'0.4em',color:'rgba(57,255,20,0.14)',textTransform:'uppercase',opacity:tin?1:0,transition:'opacity 1s ease 1s' }}>
+
+      {/* ── Footer ── */}
+      <div style={{ position:'absolute',bottom:20,left:'50%',transform:'translateX(-50%)',zIndex:3,fontFamily:'"Space Mono",monospace',fontSize:6,letterSpacing:'0.42em',color:'rgba(57,255,20,0.12)',textTransform:'uppercase',whiteSpace:'nowrap',opacity:tin?1:0,transition:'opacity 1s ease 1.1s' }}>
         © 2025 Moonviillain
       </div>
     </div>
