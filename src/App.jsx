@@ -515,88 +515,60 @@ function GlitchLines({ stage }) {
   )
 }
 
-// ── MOBILE SCENE — lightweight, touch-responsive ─────────────
+// ── MOBILE SCENE — simple, no custom shaders, cloned scene ──────
 function MobileScene() {
-  const { scene }  = useGLTF('/Untitled-v1.glb')
-  const groupRef   = useRef()
-  const centered   = useRef(false)
-  const meshes     = useRef([])
-  const rot        = useRef({ x: 0, y: 0 })
-  const targetRot  = useRef({ x: 0, y: 0 })
-  const touchRef   = useRef(null)
-  const introP     = useRef(0)
+  const gltf      = useGLTF('/Untitled-v1.glb')
+  const groupRef  = useRef()
+  const rot       = useRef({ x: 0, y: 0 })
+  const targetRot = useRef({ x: 0, y: 0 })
+  const touchRef  = useRef(null)
+  const introP    = useRef(0)
+  const opacity   = useRef(0)
 
-  // Shared uniforms — simplified subset (no burst, no glitch)
-  const uniforms = useRef({
-    uTime:         { value: 0 },
-    uBreath:       { value: 0 },
-    uGlitchTime:   { value: 0 },
-    uGlitchAmount: { value: 0 },
-    uFragmentBurst:{ value: 0 },
-    uReassemble:   { value: 0 },
-    uSeed:         { value: Math.random() * 100 },
-  })
-
-  useLayoutEffect(() => {
-    meshes.current = []
-    const u = uniforms.current
-    scene.traverse(obj => {
+  // Clone so we don't pollute the cached scene used by desktop
+  const clonedScene = useMemo(() => {
+    const clone = gltf.scene.clone(true)
+    clone.traverse(obj => {
       if (!obj.isMesh) return
-      obj.material.color                     = new THREE.Color('#978585')
-      obj.material.metalness                 = 0.45
-      obj.material.roughness                 = 0.28
-      obj.material.iridescence               = 1.0
-      obj.material.iridescenceIOR            = 3.2
-      obj.material.iridescenceThicknessRange = [120, 900]
-      obj.material.clearcoat                 = 1.0
-      obj.material.clearcoatRoughness        = 0.04
-      obj.material.envMapIntensity           = 2.8
-      obj.material.transparent               = true
-      obj.material.opacity                   = 0
-      obj.material.needsUpdate               = true
-
-      obj.material.onBeforeCompile = shader => {
-        shader.uniforms.uTime          = u.uTime
-        shader.uniforms.uBreath        = u.uBreath
-        shader.uniforms.uGlitchTime    = u.uGlitchTime
-        shader.uniforms.uGlitchAmount  = u.uGlitchAmount
-        shader.uniforms.uFragmentBurst = u.uFragmentBurst
-        shader.uniforms.uReassemble    = u.uReassemble
-        shader.uniforms.uSeed          = u.uSeed
-
-        shader.vertexShader = shader.vertexShader.replace('#include <common>',
-          `#include <common>
-          uniform float uTime; uniform float uBreath; uniform float uGlitchTime;
-          uniform float uGlitchAmount; uniform float uFragmentBurst; uniform float uReassemble; uniform float uSeed;
-          float hash(float n){ return fract(sin(n)*43758.5453123); }
-          vec3 hash3(float n){ return vec3(hash(n),hash(n+1.0),hash(n+2.0))*2.0-1.0; }
-          float noise(vec3 p){ vec3 i=floor(p);vec3 f=fract(p);f=f*f*(3.0-2.0*f);
-            return mix(mix(mix(hash(dot(i,vec3(1,57,113))),hash(dot(i+vec3(1,0,0),vec3(1,57,113))),f.x),
-              mix(hash(dot(i+vec3(0,1,0),vec3(1,57,113))),hash(dot(i+vec3(1,1,0),vec3(1,57,113))),f.x),f.y),
-              mix(mix(hash(dot(i+vec3(0,0,1),vec3(1,57,113))),hash(dot(i+vec3(1,0,1),vec3(1,57,113))),f.x),
-              mix(hash(dot(i+vec3(0,1,1),vec3(1,57,113))),hash(dot(i+vec3(1,1,1),vec3(1,57,113))),f.x),f.y),f.z); }`
-        )
-        shader.vertexShader = shader.vertexShader.replace('#include <begin_vertex>',
-          `#include <begin_vertex>
-          float breathNoise = noise(position*1.8+uTime*0.14);
-          float microPulse = sin(uTime*1.6+position.y*12.0+breathNoise*4.0)*0.006*uBreath;
-          transformed += normal*microPulse;`
-        )
-      }
-      obj.material.needsUpdate = true
-      meshes.current.push(obj)
+      // Replace with a fresh standard material — no custom shader
+      obj.material = new THREE.MeshPhysicalMaterial({
+        color:      new THREE.Color('#a08880'),
+        metalness:  0.55,
+        roughness:  0.22,
+        clearcoat:  1.0,
+        clearcoatRoughness: 0.05,
+        iridescence: 0.9,
+        iridescenceIOR: 2.8,
+        iridescenceThicknessRange: [150, 800],
+        envMapIntensity: 3.0,
+        transparent: true,
+        opacity: 0,
+      })
     })
-  }, [scene])
+    return clone
+  }, [gltf.scene])
+
+  // Center clone
+  useEffect(() => {
+    const box = new THREE.Box3().setFromObject(clonedScene)
+    if (box.min.x !== Infinity) {
+      const center = new THREE.Vector3()
+      box.getCenter(center)
+      clonedScene.position.sub(center)
+    }
+  }, [clonedScene])
 
   // Touch drag
   useEffect(() => {
-    const onStart = e => { touchRef.current = { x: e.touches[0].clientX, y: e.touches[0].clientY, rx: targetRot.current.x, ry: targetRot.current.y } }
-    const onMove  = e => {
+    const onStart = e => {
+      touchRef.current = { x: e.touches[0].clientX, y: e.touches[0].clientY, rx: targetRot.current.x, ry: targetRot.current.y }
+    }
+    const onMove = e => {
       if (!touchRef.current) return
       const dx = e.touches[0].clientX - touchRef.current.x
       const dy = e.touches[0].clientY - touchRef.current.y
-      targetRot.current.y = touchRef.current.ry + dx * 0.012
-      targetRot.current.x = Math.max(-0.5, Math.min(0.5, touchRef.current.rx + dy * 0.008))
+      targetRot.current.y = touchRef.current.ry + dx * 0.014
+      targetRot.current.x = Math.max(-0.5, Math.min(0.5, touchRef.current.rx + dy * 0.009))
     }
     const onEnd = () => { touchRef.current = null }
     window.addEventListener('touchstart', onStart, { passive: true })
@@ -612,58 +584,46 @@ function MobileScene() {
   const { camera } = useThree()
 
   useFrame((state, delta) => {
-    const t  = state.clock.getElapsedTime()
-    const u  = uniforms.current
+    const t = state.clock.getElapsedTime()
 
-    // Intro camera pull-in
-    introP.current = Math.min(introP.current + delta * 0.28, 1)
+    // Camera pull-in
+    introP.current = Math.min(introP.current + delta * 0.22, 1)
     const eased = 1 - Math.pow(1 - introP.current, 4)
-    camera.position.z = THREE.MathUtils.lerp(38, 11, eased)
+    camera.position.z = THREE.MathUtils.lerp(36, 10.5, eased)
     camera.lookAt(0, 0, 0)
 
-    // Center once
-    if (!centered.current) {
-      const box = new THREE.Box3().setFromObject(scene)
-      if (box.min.x !== Infinity) {
-        const c = new THREE.Vector3(); box.getCenter(c); scene.position.sub(c)
-        centered.current = true
-      }
-    }
+    // Opacity fade in after 0.4s
+    opacity.current = Math.min(opacity.current + delta * 0.7, 1)
+    clonedScene.traverse(obj => {
+      if (obj.isMesh) obj.material.opacity = Math.max(0, opacity.current - 0.2)
+    })
 
-    u.uTime.value   = t
-    u.uBreath.value = THREE.MathUtils.clamp((introP.current - 0.75) / 0.25, 0, 1)
+    // Auto-rotate when not touching
+    if (!touchRef.current) targetRot.current.y += delta * 0.2
 
-    // Smooth rotation toward target (touch) + idle drift
-    rot.current.y += (targetRot.current.y - rot.current.y) * 0.06
-    rot.current.x += (targetRot.current.x - rot.current.x) * 0.06
-    if (!touchRef.current) targetRot.current.y += delta * 0.18 // auto-rotate when idle
+    rot.current.y += (targetRot.current.y - rot.current.y) * 0.07
+    rot.current.x += (targetRot.current.x - rot.current.x) * 0.07
 
     if (groupRef.current) {
       groupRef.current.rotation.y = rot.current.y
-      groupRef.current.rotation.x = rot.current.x + Math.sin(t * 0.4) * 0.04
-      groupRef.current.position.y = Math.sin(t * 0.44) * 0.04
+      groupRef.current.rotation.x = rot.current.x + Math.sin(t * 0.38) * 0.035
+      groupRef.current.position.y = Math.sin(t * 0.42) * 0.05
     }
-
-    // Opacity fade-in
-    const op = THREE.MathUtils.clamp((introP.current - 0.3) / 0.5, 0, 1)
-    meshes.current.forEach(obj => { obj.material.opacity = op })
   })
 
   return (
     <>
-      {/* Neon key light follows slow orbit */}
-      <pointLight position={[4, 3, 6]}  intensity={6}   distance={18} decay={2} color="#39ff14" />
-      <pointLight position={[-5, -2, 4]} intensity={4}   distance={16} decay={2} color="#00ffaa" />
-      <pointLight position={[0, 6, -8]}  intensity={5}   distance={20} decay={2} color="#7700ff" />
-      <pointLight position={[0, -4, 0]}  intensity={2}   distance={12} decay={2} color="#00ff44" />
-      <ambientLight intensity={0.012} color="#001200" />
+      <pointLight position={[5,  3,  7]}  intensity={8}  distance={20} decay={2} color="#39ff14" />
+      <pointLight position={[-5,-2,  5]}  intensity={5}  distance={18} decay={2} color="#00ffcc" />
+      <pointLight position={[0,  7, -8]}  intensity={6}  distance={22} decay={2} color="#7700ff" />
+      <pointLight position={[0, -5,  0]}  intensity={2.5}distance={14} decay={2} color="#00ff44" />
+      <ambientLight intensity={0.04} color="#112211" />
       <group ref={groupRef}>
-        <primitive object={scene} scale={1.22} />
+        <primitive object={clonedScene} scale={1.22} />
       </group>
     </>
   )
 }
-
 // ── MOBILE GATE ───────────────────────────────────────────────
 function MobileGate() {
   const [vis, setVis] = useState(false)
